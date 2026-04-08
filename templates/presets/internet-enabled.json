@@ -1,0 +1,23 @@
+{
+  "name": "internet-enabled",
+  "description": "Outbound internet allowed with an egress audit log. Standard code execution. No GPU.",
+  "network": {
+    "egress": "allow",
+    "allowlist": ["*"],
+    "audit": true
+  },
+  "runtime": {
+    "allow_shell": true,
+    "allow_package_install": true,
+    "max_processes": 64,
+    "max_memory_mb": 4096
+  },
+  "gpu": {
+    "enabled": false
+  },
+  "audit": {
+    "log_stdout": true,
+    "log_stderr": true,
+    "retention_days": 14
+  }
+}

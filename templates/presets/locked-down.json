@@ -1,0 +1,22 @@
+{
+  "name": "locked-down",
+  "description": "Offline, no network egress, restricted code execution. For regulated workloads and evaluation harnesses.",
+  "network": {
+    "egress": "deny",
+    "allowlist": []
+  },
+  "runtime": {
+    "allow_shell": false,
+    "allow_package_install": false,
+    "max_processes": 16,
+    "max_memory_mb": 2048
+  },
+  "gpu": {
+    "enabled": false
+  },
+  "audit": {
+    "log_stdout": true,
+    "log_stderr": true,
+    "retention_days": 30
+  }
+}
