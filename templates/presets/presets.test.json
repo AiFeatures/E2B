@@ -1,0 +1,5 @@
+{
+  "$comment": "Minimal schema coverage for policy presets. Asserts required keys on every preset.",
+  "required_keys": ["name", "description", "network", "runtime", "gpu", "audit"],
+  "presets": ["locked-down", "internet-enabled", "gpu-enabled"]
+}

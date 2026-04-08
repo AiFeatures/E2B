@@ -1,0 +1,24 @@
+{
+  "name": "gpu-enabled",
+  "description": "GPU-attached environment for training, inference, and vision workloads. Outbound internet allowed.",
+  "network": {
+    "egress": "allow",
+    "allowlist": ["*"],
+    "audit": true
+  },
+  "runtime": {
+    "allow_shell": true,
+    "allow_package_install": true,
+    "max_processes": 128,
+    "max_memory_mb": 16384
+  },
+  "gpu": {
+    "enabled": true,
+    "min_vram_gb": 16
+  },
+  "audit": {
+    "log_stdout": true,
+    "log_stderr": true,
+    "retention_days": 14
+  }
+}
