@@ -52,7 +52,7 @@
     "@typescript-eslint/eslint-plugin": "^7.11.0",
     "@typescript-eslint/parser": "^7.11.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "@vitest/browser": "^3.2.4",
+    "@vitest/browser": "^3.2.5",
     "dotenv": "^16.4.5",
     "eslint": "^8.57.1",
     "json-schema-to-typescript": "^15.0.4",
