@@ -1,6 +1,7 @@
 import gzip
 import inspect
 import json
+import logging
 import struct
 import typing
 
@@ -188,6 +189,7 @@ class Client:
         compressor=None,
         json: Optional[bool] = False,
         headers: Optional[Dict[str, str]] = None,
+        logger: Optional[logging.Logger] = None,
     ):
         if headers is None:
             headers = {}
@@ -200,6 +202,23 @@ class Client:
         self._compressor = compressor
         self._headers = headers
         self._connection_retries = 3
+        self._logger = logger
+
+    def _log_request(self) -> None:
+        if self._logger is not None:
+            self._logger.info(f"Request: POST {self.url}")
+
+    def _log_response(self, status: int) -> None:
+        if self._logger is None:
+            return
+        if status >= 400:
+            self._logger.error(f"Response: {status} {self.url}")
+        else:
+            self._logger.info(f"Response: {status} {self.url}")
+
+    def _log_stream_message(self) -> None:
+        if self._logger is not None:
+            self._logger.debug(f"Response stream: {self.url}")
 
     def _prepare_unary_request(
         self,
@@ -250,6 +269,8 @@ class Client:
         self,
         http_resp: Response,
     ):
+        self._log_response(http_resp.status)
+
         if http_resp.status != 200:
             raise error_for_response(http_resp)
 
@@ -281,6 +302,7 @@ class Client:
             **opts,
         )
 
+        self._log_request()
         res = await self.async_pool.request(**req_data)
         return self._process_unary_response(res)
 
@@ -302,6 +324,7 @@ class Client:
             **opts,
         )
 
+        self._log_request()
         res = self.pool.request(**req_data)
         return self._process_unary_response(res)
 
@@ -322,16 +345,19 @@ class Client:
         data = self._codec.encode(req)
         flags = EnvelopeFlags(0)
 
+        # `request_timeout` bounds connection setup and request sending, but NOT the
+        # stream read: a stream can stay open for the whole command `timeout` (minutes
+        # or, when disabled, indefinitely), so we deliberately leave `read` unset.
+        # The command `timeout` is enforced server-side via the `connect-timeout-ms`
+        # header (see `_create_stream_timeout`), which returns a clean `deadline_exceeded`.
+        # This mirrors the JS SDK, which has no per-chunk read timeout either — setting
+        # `read` to the command `timeout` would race that server response and surface a
+        # raw transport `ReadTimeout` instead.
         timeout_ext = {}
         if request_timeout is not None:
             timeout_ext["connect"] = request_timeout
             timeout_ext["pool"] = request_timeout
             timeout_ext["write"] = request_timeout
-        if timeout:
-            # This is not actually timeout for the whole stream read, but timeout from the last read chunk.
-            # At worst then, the timeout of a hanging stream could be 2 * timeout (reading body until timeout-ϵ, then waiting for the read timeout).
-            # However, this is still better than no timeout at all and the full timeout in sync python might be way more complicated.
-            timeout_ext["read"] = timeout
         extensions = {"timeout": timeout_ext} if timeout_ext else None
 
         if self._compressor is not None:
@@ -361,7 +387,8 @@ class Client:
             },
         }
 
-    @_retry(RemoteProtocolError, 3)
+    # Note: no retry here — generator functions don't execute until iterated, so a
+    # call-level retry never fires, and retrying mid-stream would replay delivered events.
     async def acall_server_stream(
         self,
         req,
@@ -386,16 +413,18 @@ class Client:
             response_type=self._response_type,
         )
 
+        self._log_request()
         async with self.async_pool.stream(**req_data) as http_resp:
             if http_resp.status != 200:
+                self._log_response(http_resp.status)
                 await http_resp.aread()
                 raise error_for_response(http_resp)
 
             async for chunk in http_resp.aiter_stream():
                 for parsed in parser.parse(chunk):
+                    self._log_stream_message()
                     yield parsed
 
-    @_retry(RemoteProtocolError, 3)
     def call_server_stream(
         self,
         req,
@@ -420,13 +449,16 @@ class Client:
             response_type=self._response_type,
         )
 
+        self._log_request()
         with self.pool.stream(**req_data) as http_resp:
             if http_resp.status != 200:
+                self._log_response(http_resp.status)
                 http_resp.read()
                 raise error_for_response(http_resp)
 
             for chunk in http_resp.iter_stream():
                 for parsed in parser.parse(chunk):
+                    self._log_stream_message()
                     yield parsed
 
     def call_client_stream(self, req, **opts):
@@ -479,7 +511,10 @@ class ServerStreamParser:
     def parse(self, chunk: bytes) -> Generator[Any, None, None]:
         self.buffer += chunk
 
-        while len(self.buffer) >= envelope_header_length:
+        # Once the header is consumed, the remaining payload can be shorter
+        # than the header length, so only require a full header when we still
+        # need to read one.
+        while self._header is not None or len(self.buffer) >= envelope_header_length:
             flags, data_len = self.header
 
             if data_len > len(self.buffer):

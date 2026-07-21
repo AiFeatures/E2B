@@ -1,5 +1,5 @@
 import * as commander from 'commander'
-import { Sandbox } from 'e2b'
+import { NotFoundError, Sandbox } from 'e2b'
 
 import { ensureAPIKey } from 'src/api'
 import { asBold } from 'src/utils/format'
@@ -50,8 +50,7 @@ export const infoCommand = new commander.Command('info')
     try {
       const format = options.format || 'pretty'
       const apiKey = ensureAPIKey()
-      const info = await Sandbox.getFullInfo(sandboxID, { apiKey })
-      delete info.envdAccessToken
+      const info = await Sandbox.getInfo(sandboxID, { apiKey })
 
       if (format === 'pretty') {
         renderPrettyInfo(info as unknown as Record<string, unknown>)
@@ -62,6 +61,11 @@ export const infoCommand = new commander.Command('info')
         process.exit(1)
       }
     } catch (err: any) {
+      if (err instanceof NotFoundError) {
+        console.error(`Sandbox ${asBold(sandboxID)} wasn't found`)
+        process.exit(1)
+        return
+      }
       console.error(err)
       process.exit(1)
     }

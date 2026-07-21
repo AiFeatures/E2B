@@ -3,6 +3,7 @@ import {
   GitUpstreamError,
   InvalidArgumentError,
 } from '../../errors'
+import { shellQuote } from '../../utils'
 import type { CommandStartOpts } from '../commands'
 import type { CommandResult } from '../commands/commandHandle'
 import { Commands } from '../commands'
@@ -20,7 +21,6 @@ import {
   isMissingUpstream,
   parseGitBranches,
   parseGitStatus,
-  shellEscape,
   stripCredentials,
   deriveRepoDirFromUrl,
   withCredentials,
@@ -880,7 +880,7 @@ export class Git {
       rest
     )
 
-    const approveCmd = `printf %s ${shellEscape(credentialInput)} | ${buildGitCommand(
+    const approveCmd = `printf %s ${shellQuote(credentialInput)} | ${buildGitCommand(
       ['credential', 'approve']
     )}`
 
@@ -937,7 +937,7 @@ export class Git {
   /**
    * Execute a raw shell command while applying default git environment variables.
    * 
-   Note: We can liekly just modify runGit later to allow appending commands to the git but for now it's separate.
+   Note: We can likely just modify runGit later to allow appending commands to the git but for now it's separate.
    */
   private async runShell(
     cmd: string,

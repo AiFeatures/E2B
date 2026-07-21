@@ -6,16 +6,22 @@ import {
   VolumeApiOpts,
   FILE_TIMEOUT_MS,
 } from './client'
-import { ConnectionConfig, ConnectionOpts } from '../connectionConfig'
+import {
+  ConnectionConfig,
+  ConnectionOpts,
+  setupRequestController,
+  wrapStreamWithConnectionCleanup,
+} from '../connectionConfig'
 import { NotFoundError, VolumeError } from '../errors'
-import { toBlob } from '../utils'
+import { toUploadBody } from '../utils'
 import { VolumeFileType } from './types'
 import type {
   VolumeAndToken,
   VolumeEntryStat,
   VolumeInfo,
-  VolumeMetadataOptions,
-  VolumeWriteOptions,
+  VolumeMetadataOpts,
+  VolumeReadOpts,
+  VolumeWriteOpts,
 } from './types'
 
 /**
@@ -66,6 +72,11 @@ export class Volume {
   readonly debug?: boolean
 
   /**
+   * Proxy URL used for requests to the volume content API.
+   */
+  readonly proxy?: string
+
+  /**
    * Create a local Volume instance with no API call.
    *
    * @param volumeId volume ID.
@@ -73,19 +84,22 @@ export class Volume {
    * @param token volume auth token.
    * @param domain domain for the volume API.
    * @param debug whether to use debug mode.
+   * @param proxy proxy URL for the volume content API.
    */
   constructor(
     volumeId: string,
     name: string,
     token: string,
     domain?: string,
-    debug?: boolean
+    debug?: boolean,
+    proxy?: string
   ) {
     this.volumeId = volumeId
     this.name = name
     this.token = token
     this.domain = domain
     this.debug = debug
+    this.proxy = proxy
   }
 
   /**
@@ -104,7 +118,7 @@ export class Volume {
       body: {
         name,
       },
-      signal: config.getSignal(opts?.requestTimeoutMs),
+      signal: config.getSignal(opts?.requestTimeoutMs, opts?.signal),
     })
 
     const err = handleApiError(res, VolumeError)
@@ -121,7 +135,8 @@ export class Volume {
       res.data.name,
       res.data.token,
       config.domain,
-      config.debug
+      config.debug,
+      config.proxy
     )
   }
 
@@ -139,7 +154,14 @@ export class Volume {
   ): Promise<Volume> {
     const config = new ConnectionConfig(opts)
     const { name, token } = await Volume.getInfo(volumeId, opts)
-    return new Volume(volumeId, name, token, config.domain, config.debug)
+    return new Volume(
+      volumeId,
+      name,
+      token,
+      config.domain,
+      config.debug,
+      config.proxy
+    )
   }
 
   /**
@@ -163,7 +185,7 @@ export class Volume {
           volumeID: volumeId,
         },
       },
-      signal: config.getSignal(opts?.requestTimeoutMs),
+      signal: config.getSignal(opts?.requestTimeoutMs, opts?.signal),
     })
 
     if (res.response.status === 404) {
@@ -194,7 +216,7 @@ export class Volume {
     const client = new ApiClient(config)
 
     const res = await client.api.GET('/volumes', {
-      signal: config.getSignal(opts?.requestTimeoutMs),
+      signal: config.getSignal(opts?.requestTimeoutMs, opts?.signal),
     })
 
     const err = handleApiError(res, VolumeError)
@@ -227,7 +249,7 @@ export class Volume {
           volumeID: volumeId,
         },
       },
-      signal: config.getSignal(opts?.requestTimeoutMs),
+      signal: config.getSignal(opts?.requestTimeoutMs, opts?.signal),
     })
 
     if (res.response.status === 404) {
@@ -268,7 +290,7 @@ export class Volume {
           depth: opts?.depth,
         },
       },
-      signal: config.getSignal(opts?.requestTimeoutMs),
+      signal: config.getSignal(),
     })
 
     if (res.response.status === 404) {
@@ -294,7 +316,7 @@ export class Volume {
    */
   async makeDir(
     path: string,
-    opts?: VolumeWriteOptions & VolumeApiOpts
+    opts?: VolumeWriteOpts & VolumeApiOpts
   ): Promise<VolumeEntryStat> {
     const config = new VolumeConnectionConfig(this, opts)
     const client = new VolumeApiClient(config)
@@ -312,7 +334,7 @@ export class Volume {
           force: opts?.force,
         },
       },
-      signal: config.getSignal(opts?.requestTimeoutMs),
+      signal: config.getSignal(),
     })
 
     if (res.response.status === 404) {
@@ -354,7 +376,7 @@ export class Volume {
           path,
         },
       },
-      signal: config.getSignal(opts?.requestTimeoutMs),
+      signal: config.getSignal(),
     })
 
     if (res.response.status === 404) {
@@ -409,7 +431,7 @@ export class Volume {
    */
   async updateMetadata(
     path: string,
-    metadata: VolumeMetadataOptions,
+    metadata: VolumeMetadataOpts,
     opts?: VolumeApiOpts
   ): Promise<VolumeEntryStat> {
     const config = new VolumeConnectionConfig(this, opts)
@@ -429,7 +451,7 @@ export class Volume {
         gid: metadata.gid,
         mode: metadata.mode,
       },
-      signal: config.getSignal(opts?.requestTimeoutMs),
+      signal: config.getSignal(),
     })
 
     if (res.response.status === 404) {
@@ -463,7 +485,7 @@ export class Volume {
    */
   async readFile(
     path: string,
-    opts?: VolumeApiOpts & { format?: 'text' }
+    opts?: VolumeReadOpts & { format?: 'text' }
   ): Promise<string>
   /**
    * Read file content as a `Uint8Array`.
@@ -478,7 +500,7 @@ export class Volume {
    */
   async readFile(
     path: string,
-    opts?: VolumeApiOpts & { format: 'bytes' }
+    opts?: VolumeReadOpts & { format: 'bytes' }
   ): Promise<Uint8Array>
   /**
    * Read file content as a `Blob`.
@@ -493,7 +515,7 @@ export class Volume {
    */
   async readFile(
     path: string,
-    opts?: VolumeApiOpts & { format: 'blob' }
+    opts?: VolumeReadOpts & { format: 'blob' }
   ): Promise<Blob>
   /**
    * Read file content as a `ReadableStream`.
@@ -508,17 +530,74 @@ export class Volume {
    */
   async readFile(
     path: string,
-    opts?: VolumeApiOpts & { format: 'stream' }
+    opts?: VolumeReadOpts & { format: 'stream' }
   ): Promise<ReadableStream<Uint8Array>>
   async readFile(
     path: string,
-    opts?: VolumeApiOpts & {
+    opts?: VolumeReadOpts & {
       format?: 'text' | 'stream' | 'bytes' | 'blob'
     }
   ): Promise<unknown> {
     const format = opts?.format ?? 'text'
-    const config = new VolumeConnectionConfig(this, opts)
+    const config = new VolumeConnectionConfig(this, {
+      ...opts,
+      requestTimeoutMs: opts?.requestTimeoutMs ?? FILE_TIMEOUT_MS,
+    })
     const client = new VolumeApiClient(config)
+
+    if (format === 'stream') {
+      // The request timeout bounds only the initial handshake; once the
+      // response arrives, the stream lives until it's consumed, cancelled, the
+      // user signal aborts, or the per-chunk idle timeout fires. Matches the
+      // sandbox `files.read` stream path.
+      const { controller, clearStartTimeout, cleanup } = setupRequestController(
+        config.requestTimeoutMs,
+        opts?.signal
+      )
+
+      try {
+        const res = await client.api.GET('/volumecontent/{volumeID}/file', {
+          params: {
+            path: { volumeID: this.volumeId },
+            query: { path },
+          },
+          parseAs: 'stream',
+          signal: controller.signal,
+        })
+
+        if (res.response.status === 404) {
+          // Cancel the unconsumed body so the pooled connection is released
+          // before we propagate.
+          if (res.response.body && !res.response.bodyUsed) {
+            await res.response.body.cancel().catch(() => {})
+          }
+          cleanup()
+          throw new NotFoundError(`Path ${path} not found`)
+        }
+
+        const err = handleApiError(res, VolumeError)
+        if (err) {
+          if (res.response.body && !res.response.bodyUsed) {
+            await res.response.body.cancel().catch(() => {})
+          }
+          cleanup()
+          throw err
+        }
+
+        return wrapStreamWithConnectionCleanup(
+          res.data as ReadableStream<Uint8Array> | null,
+          {
+            clearStartTimeout,
+            cleanup,
+            controller,
+            idleTimeoutMs: opts?.streamIdleTimeoutMs ?? config.requestTimeoutMs,
+          }
+        )
+      } catch (err) {
+        cleanup()
+        throw err
+      }
+    }
 
     const res = await client.api.GET('/volumecontent/{volumeID}/file', {
       params: {
@@ -530,7 +609,7 @@ export class Volume {
         },
       },
       parseAs: format === 'bytes' ? 'arrayBuffer' : format,
-      signal: config.getSignal(opts?.requestTimeoutMs ?? FILE_TIMEOUT_MS),
+      signal: config.getSignal(),
     })
 
     if (res.response.status === 404) {
@@ -542,19 +621,19 @@ export class Volume {
       throw err
     }
 
+    // When the file is empty, `res.data` is `undefined`, so empty values are synthesized below.
     if (format === 'bytes') {
-      return new Uint8Array(res.data as ArrayBuffer)
+      return res.data instanceof ArrayBuffer
+        ? new Uint8Array(res.data)
+        : new Uint8Array()
     }
 
     if (format === 'text') {
-      // When the file is empty, res.data is parsed as `{}`. This is a workaround to return an empty string.
-      if (res.response.headers.get('content-length') === '0') {
-        return ''
-      }
       return typeof res.data === 'string' ? res.data : ''
     }
 
-    return res.data
+    // format === 'blob'
+    return res.data instanceof Blob ? res.data : new Blob([])
   }
 
   /**
@@ -565,7 +644,7 @@ export class Volume {
    * Writing to a file that already exists overwrites the file.
    *
    * @param path path to the file.
-   * @param data data to write to the file. Data can be a string, `ArrayBuffer`, `Blob`, or `ReadableStream`.
+   * @param data data to write to the file. Data can be a string, `ArrayBuffer`, `Blob`, or `ReadableStream`. Outside the browser, `ReadableStream` data is streamed to the API instead of being buffered in memory.
    * @param options file creation options.
    * @param opts connection options.
    *
@@ -574,12 +653,24 @@ export class Volume {
   async writeFile(
     path: string,
     data: string | ArrayBuffer | Blob | ReadableStream<Uint8Array>,
-    opts?: VolumeWriteOptions & VolumeApiOpts
+    opts?: VolumeWriteOpts & VolumeApiOpts
   ): Promise<VolumeEntryStat> {
-    const config = new VolumeConnectionConfig(this, opts)
+    const config = new VolumeConnectionConfig(this, {
+      ...opts,
+      requestTimeoutMs: opts?.requestTimeoutMs ?? FILE_TIMEOUT_MS,
+    })
     const client = new VolumeApiClient(config)
 
-    const blob = await toBlob(data)
+    // `toUploadBody` returns a `ReadableStream` only when the body should be
+    // streamed (non-browser stream input); otherwise it buffers into a Blob.
+    const body = await toUploadBody(data)
+    const isStream = body instanceof ReadableStream
+
+    // A streamed upload carries no client-side timeout: the socket-write
+    // "wire" isn't observable through fetch, and a stalled producer is the
+    // caller's own code, so a stuck streamed upload is bounded server-side (or
+    // via `opts.signal`). Buffered uploads keep the normal request timeout.
+    const signal = isStream ? opts?.signal : config.getSignal()
 
     const res = await client.api.PUT('/volumecontent/{volumeID}/file', {
       params: {
@@ -594,12 +685,14 @@ export class Volume {
           force: opts?.force,
         },
       },
-      bodySerializer: () => blob,
+      bodySerializer: () => body,
       body: {} as any,
       headers: {
         'Content-Type': 'application/octet-stream',
       },
-      signal: config.getSignal(opts?.requestTimeoutMs ?? FILE_TIMEOUT_MS),
+      signal,
+      // Streaming request bodies require half-duplex mode.
+      ...(isStream && { duplex: 'half' as const }),
     })
 
     if (res.response.status === 404) {
@@ -639,7 +732,7 @@ export class Volume {
           path,
         },
       },
-      signal: config.getSignal(opts?.requestTimeoutMs),
+      signal: config.getSignal(),
     })
 
     if (res.response.status === 404) {
@@ -657,6 +750,10 @@ export type {
   VolumeInfo,
   VolumeAndToken,
   VolumeEntryStat,
+  VolumeMetadataOpts,
+  VolumeReadOpts,
+  VolumeWriteOpts,
+  // Deprecated aliases, kept for backwards compatibility.
   VolumeMetadataOptions,
   VolumeWriteOptions,
 } from './types'

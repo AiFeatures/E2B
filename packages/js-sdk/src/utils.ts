@@ -103,10 +103,6 @@ export function stripAnsi(text: string): string {
   return text.replace(ansiRegex(), '')
 }
 
-export async function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 /**
  * Convert data to a Blob, avoiding unnecessary conversions when possible.
  */
@@ -125,9 +121,35 @@ export function toBlob(
   return new Response(data).blob()
 }
 
+// Characters that are safe to leave unquoted in a POSIX shell, matching the
+// set used by Python's shlex.quote (`[^\w@%+=:,./-]` is considered unsafe).
+const UNSAFE_SHELL_CHAR = /[^\w@%+=:,./-]/
+
+/**
+ * Quote a string for safe interpolation into a POSIX shell command.
+ *
+ * Faithful port of Python's `shlex.quote`: an empty string becomes `''`,
+ * values containing only safe characters are returned unchanged (keeping
+ * generated commands stable and cache-friendly), and anything else is wrapped
+ * in single quotes with embedded single quotes escaped as `'"'"'`.
+ */
+export function shellQuote(s: string): string {
+  if (s === '') {
+    return "''"
+  }
+  if (!UNSAFE_SHELL_CHAR.test(s)) {
+    return s
+  }
+  return "'" + s.replace(/'/g, "'\"'\"'") + "'"
+}
+
 /**
  * Prepare data for upload as a BodyInit, optionally gzip-compressed.
- * When gzip is enabled, compresses the data and returns a Blob.
+ *
+ * Outside the browser, streams (and gzip-compressed data) are returned as
+ * `ReadableStream` so they can be uploaded without buffering in memory.
+ * Browsers don't support streaming request bodies, so data is buffered into
+ * a Blob there.
  */
 export async function toUploadBody(
   data: string | ArrayBuffer | Blob | ReadableStream,
@@ -141,7 +163,11 @@ export async function toUploadBody(
           ? data.stream()
           : new Blob([data]).stream()
     const compressed = stream.pipeThrough(new CompressionStream('gzip'))
-    return new Response(compressed).blob()
+    return runtime === 'browser' ? new Response(compressed).blob() : compressed
+  }
+
+  if (data instanceof ReadableStream && runtime !== 'browser') {
+    return data
   }
 
   return toBlob(data)
