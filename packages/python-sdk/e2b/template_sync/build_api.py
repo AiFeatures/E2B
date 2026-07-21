@@ -37,6 +37,7 @@ from e2b.template.types import (
     TemplateTag,
     TemplateTagInfo,
 )
+from e2b.template.consts import FILE_UPLOAD_TIMEOUT_SECONDS
 from e2b.template.utils import get_build_step_index, tar_file_stream
 
 
@@ -104,15 +105,42 @@ def upload_file(
     url: str,
     ignore_patterns: List[str],
     resolve_symlinks: bool,
+    gzip: bool,
     stack_trace: Optional[TracebackType],
+    request_timeout: Optional[float] = None,
 ):
+    # Uploading a large build-context archive can take far longer than the 60s
+    # general API timeout, so default to a 1-hour upload timeout unless the
+    # caller set an explicit request_timeout. Matches the JS SDK
+    # (FILE_UPLOAD_TIMEOUT_MS).
+    upload_timeout = (
+        request_timeout if request_timeout is not None else FILE_UPLOAD_TIMEOUT_SECONDS
+    )
     try:
-        tar_buffer = tar_file_stream(
-            file_name, context_path, ignore_patterns, resolve_symlinks
+        tar_file = tar_file_stream(
+            file_name, context_path, ignore_patterns, resolve_symlinks, gzip
         )
-        client = api_client.get_httpx_client()
-        response = client.put(url, content=tar_buffer.getvalue())
-        response.raise_for_status()
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(upload_timeout),
+                verify=api_client._verify_ssl,
+                follow_redirects=api_client._follow_redirects,
+                proxy=getattr(api_client, "_proxy", None),
+                http2=False,
+            ) as client:
+                # httpx streams the archive from disk in chunks and sets
+                # Content-Length from the file size—S3 presigned URLs reject
+                # chunked transfer encoding.
+                response = client.put(url, content=tar_file)
+            response.raise_for_status()
+        finally:
+            # Closing the spooled temp file is best-effort: a failure here
+            # must not mask a successful upload as a FileUploadException,
+            # nor overwrite a real upload error.
+            try:
+                tar_file.close()
+            except Exception:
+                pass
     except httpx.HTTPStatusError as e:
         raise FileUploadException(f"Failed to upload file: {e}").with_traceback(
             stack_trace
@@ -210,7 +238,8 @@ def wait_for_build_finish(
     logs_offset = 0
     status = TemplateBuildStatus.BUILDING
 
-    while status in [TemplateBuildStatus.BUILDING, TemplateBuildStatus.WAITING]:
+    def poll_status() -> TemplateBuildStatusResponse:
+        nonlocal logs_offset
         build_status = get_build_status(client, template_id, build_id, logs_offset)
 
         logs_offset += len(build_status.log_entries)
@@ -219,15 +248,24 @@ def wait_for_build_finish(
             if on_build_logs:
                 on_build_logs(log_entry)
 
+        return build_status
+
+    while status in [TemplateBuildStatus.BUILDING, TemplateBuildStatus.WAITING]:
+        build_status = poll_status()
+
         status = build_status.status
 
-        if status == TemplateBuildStatus.READY:
-            return
+        if status in [TemplateBuildStatus.READY, TemplateBuildStatus.ERROR]:
+            # The status endpoint returns at most 100 log entries per call, so
+            # the terminal response may not include the last logs - keep
+            # fetching until they are drained.
+            tail_status = build_status
+            while len(tail_status.log_entries) > 0:
+                tail_status = poll_status()
 
-        elif status == TemplateBuildStatus.WAITING:
-            pass
+            if status == TemplateBuildStatus.READY:
+                return
 
-        elif status == TemplateBuildStatus.ERROR:
             traceback = None
             if build_status.reason and build_status.reason.step:
                 # Find the corresponding stack trace for the failed step

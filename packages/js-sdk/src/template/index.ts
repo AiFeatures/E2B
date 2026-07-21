@@ -1,8 +1,8 @@
 import type { PathLike } from 'node:fs'
 import { ApiClient } from '../api'
 import { ConnectionConfig, ConnectionOpts } from '../connectionConfig'
-import { BuildError } from '../errors'
-import { runtime } from '../utils'
+import { BuildError, InvalidArgumentError } from '../errors'
+import { runtime, shellQuote } from '../utils'
 import {
   assignTags,
   checkAliasExists,
@@ -16,7 +16,7 @@ import {
   uploadFile,
   waitForBuildFinish,
 } from './buildApi'
-import { RESOLVE_SYMLINKS, STACK_TRACE_DEPTH } from './consts'
+import { GZIP, RESOLVE_SYMLINKS, STACK_TRACE_DEPTH } from './consts'
 import { parseDockerfile } from './dockerfileParser'
 import { LogEntry, LogEntryEnd, LogEntryStart } from './logger'
 import { ReadyCmd, waitForFile } from './readycmd'
@@ -66,8 +66,7 @@ export class TemplateBase
   // Force the next layer to be rebuilt
   private forceNextLayer: boolean = false
   private instructions: Instruction[] = []
-  private fileContextPath: PathLike =
-    runtime === 'browser' ? '.' : (getCallerDirectory(STACK_TRACE_DEPTH) ?? '.')
+  private fileContextPath: PathLike
   private fileIgnorePatterns: string[] = []
   private logsRefreshFrequency: number = 200
   private stackTraces: (string | undefined)[] = []
@@ -75,7 +74,11 @@ export class TemplateBase
   private stackTracesOverride: string | undefined = undefined
 
   constructor(options?: TemplateOptions) {
-    this.fileContextPath = options?.fileContextPath ?? this.fileContextPath
+    this.fileContextPath =
+      options?.fileContextPath ??
+      (runtime === 'browser'
+        ? '.'
+        : (getCallerDirectory(STACK_TRACE_DEPTH) ?? '.'))
     this.fileIgnorePatterns =
       options?.fileIgnorePatterns ?? this.fileIgnorePatterns
   }
@@ -166,7 +169,7 @@ export class TemplateBase
       const config = new ConnectionConfig(buildOptions)
       const client = new ApiClient(config)
 
-      const data = await baseTemplate.build(client, name, buildOptions)
+      const data = await baseTemplate.build(client, config, name, buildOptions)
 
       buildOptions.onBuildLogs?.(
         new LogEntry(new Date(), 'info', 'Waiting for logs...')
@@ -178,6 +181,8 @@ export class TemplateBase
         onBuildLogs: buildOptions.onBuildLogs,
         logsRefreshFrequency: baseTemplate.logsRefreshFrequency,
         stackTraces: baseTemplate.stackTraces,
+        signal: buildOptions.signal,
+        requestTimeoutMs: config.requestTimeoutMs,
       })
 
       return data
@@ -242,7 +247,7 @@ export class TemplateBase
     const config = new ConnectionConfig(buildOptions)
     const client = new ApiClient(config)
 
-    return (template as TemplateBase).build(client, name, buildOptions)
+    return (template as TemplateBase).build(client, config, name, buildOptions)
   }
 
   /**
@@ -263,11 +268,15 @@ export class TemplateBase
     const config = new ConnectionConfig(options)
     const client = new ApiClient(config)
 
-    return await getBuildStatus(client, {
-      templateID: data.templateId,
-      buildID: data.buildId,
-      logsOffset: options?.logsOffset,
-    })
+    return await getBuildStatus(
+      client,
+      {
+        templateID: data.templateId,
+        buildID: data.buildId,
+        logsOffset: options?.logsOffset ?? 0,
+      },
+      config.getSignal(undefined, options?.signal)
+    )
   }
 
   /**
@@ -315,7 +324,11 @@ export class TemplateBase
     const config = new ConnectionConfig(options)
     const client = new ApiClient(config)
 
-    return checkAliasExists(client, { alias })
+    return checkAliasExists(
+      client,
+      { alias },
+      config.getSignal(undefined, options?.signal)
+    )
   }
 
   /**
@@ -343,7 +356,11 @@ export class TemplateBase
     const config = new ConnectionConfig(options)
     const client = new ApiClient(config)
     const normalizedTags = Array.isArray(tags) ? tags : [tags]
-    return assignTags(client, { targetName, tags: normalizedTags })
+    return assignTags(
+      client,
+      { targetName, tags: normalizedTags },
+      config.getSignal(undefined, options?.signal)
+    )
   }
 
   /**
@@ -370,7 +387,11 @@ export class TemplateBase
     const config = new ConnectionConfig(options)
     const client = new ApiClient(config)
     const normalizedTags = Array.isArray(tags) ? tags : [tags]
-    return removeTags(client, { name, tags: normalizedTags })
+    return removeTags(
+      client,
+      { name, tags: normalizedTags },
+      config.getSignal(undefined, options?.signal)
+    )
   }
 
   /**
@@ -394,7 +415,11 @@ export class TemplateBase
   ): Promise<TemplateTag[]> {
     const config = new ConnectionConfig(options)
     const client = new ApiClient(config)
-    return getTemplateTags(client, { templateID: templateId })
+    return getTemplateTags(
+      client,
+      { templateID: templateId },
+      config.getSignal(undefined, options?.signal)
+    )
   }
 
   fromDebianImage(variant: string = 'stable'): TemplateBuilder {
@@ -425,6 +450,14 @@ export class TemplateBase
     baseImage: string,
     credentials?: { username: string; password: string }
   ): TemplateBuilder {
+    // Validate before mutating the builder.
+    if (credentials && (!credentials.username || !credentials.password)) {
+      throw new InvalidArgumentError(
+        'Both username and password are required when providing registry credentials',
+        getCallerFrame(STACK_TRACE_DEPTH - 1)
+      )
+    }
+
     this.baseImage = baseImage
     this.baseTemplate = undefined
 
@@ -540,6 +573,7 @@ export class TemplateBase
       user?: string
       mode?: number
       resolveSymlinks?: boolean
+      gzip?: boolean
     }
   ): TemplateBuilder {
     if (runtime === 'browser') {
@@ -568,10 +602,14 @@ export class TemplateBase
         force: options?.forceUpload || this.forceNextLayer,
         forceUpload: options?.forceUpload,
         resolveSymlinks: options?.resolveSymlinks,
+        gzip: options?.gzip,
       })
+
+      // Collect one stack trace per pushed instruction so build steps stay
+      // aligned with their stack traces when copying multiple sources
+      this.collectStackTrace()
     }
 
-    this.collectStackTrace()
     return this
   }
 
@@ -583,7 +621,9 @@ export class TemplateBase
     // Stack trace that will be used to re-throw the error with
     const stackTrace = getCallerFrame(STACK_TRACE_DEPTH - 1)
 
-    this.runInNewStackTraceContext(() => {
+    // Use the override so each copied item collects this stack trace,
+    // keeping build steps aligned with their stack traces
+    this.runInStackTraceOverrideContext(() => {
       for (const item of items) {
         try {
           this.copy(item.src, item.dest, {
@@ -591,6 +631,7 @@ export class TemplateBase
             user: item.user,
             mode: item.mode,
             resolveSymlinks: item.resolveSymlinks,
+            gzip: item.gzip,
           })
         } catch (error) {
           const copyError = error as Error
@@ -598,7 +639,7 @@ export class TemplateBase
           throw copyError
         }
       }
-    })
+    }, stackTrace)
 
     return this
   }
@@ -615,7 +656,7 @@ export class TemplateBase
     if (options?.force) {
       args.push('-f')
     }
-    args.push(...paths.map((p) => p.toString()))
+    args.push(...paths.map((p) => shellQuote(p.toString())))
     return this.runInNewStackTraceContext(() =>
       this.runCmd(args.join(' '), { user: options?.user })
     )
@@ -626,7 +667,7 @@ export class TemplateBase
     dest: PathLike,
     options?: { force?: boolean; user?: string }
   ): TemplateBuilder {
-    const args = ['mv', src.toString(), dest.toString()]
+    const args = ['mv', shellQuote(src.toString()), shellQuote(dest.toString())]
     if (options?.force) {
       args.push('-f')
     }
@@ -644,7 +685,7 @@ export class TemplateBase
     if (options?.mode) {
       args.push(`-m ${padOctal(options.mode)}`)
     }
-    args.push(...paths.map((p) => p.toString()))
+    args.push(...paths.map((p) => shellQuote(p.toString())))
     return this.runInNewStackTraceContext(() =>
       this.runCmd(args.join(' '), { user: options?.user })
     )
@@ -659,7 +700,7 @@ export class TemplateBase
     if (options?.force) {
       args.push('-f')
     }
-    args.push(src.toString(), dest.toString())
+    args.push(shellQuote(src.toString()), shellQuote(dest.toString()))
     return this.runInNewStackTraceContext(() =>
       this.runCmd(args.join(' '), { user: options?.user })
     )
@@ -833,16 +874,16 @@ export class TemplateBase
     path?: PathLike,
     options?: { branch?: string; depth?: number; user?: string }
   ): TemplateBuilder {
-    const args = ['git', 'clone', url]
+    const args = ['git', 'clone', shellQuote(url)]
     if (options?.branch) {
-      args.push(`--branch ${options.branch}`)
+      args.push(`--branch ${shellQuote(options.branch)}`)
       args.push('--single-branch')
     }
     if (options?.depth) {
       args.push(`--depth ${options.depth}`)
     }
     if (path) {
-      args.push(path.toString())
+      args.push(shellQuote(path.toString()))
     }
 
     return this.runInNewStackTraceContext(() =>
@@ -906,7 +947,7 @@ export class TemplateBase
 
     return this.runInNewStackTraceContext(() => {
       return this.runCmd(
-        `devcontainer build --workspace-folder ${devcontainerDirectory}`,
+        `devcontainer build --workspace-folder ${shellQuote(devcontainerDirectory)}`,
         { user: 'root' }
       )
     })
@@ -921,8 +962,9 @@ export class TemplateBase
     }
 
     return this.runInNewStackTraceContext(() => {
+      const dir = shellQuote(devcontainerDirectory)
       return this.setStartCmd(
-        `sudo devcontainer up --workspace-folder ${devcontainerDirectory} && sudo /prepare-exec.sh ${devcontainerDirectory} | sudo tee /devcontainer.sh > /dev/null && sudo chmod +x /devcontainer.sh && sudo touch /devcontainer.up`,
+        `sudo devcontainer up --workspace-folder ${dir} && sudo /prepare-exec.sh ${dir} | sudo tee /devcontainer.sh > /dev/null && sudo chmod +x /devcontainer.sh && sudo touch /devcontainer.up`,
         waitForFile('/devcontainer.up')
       )
     })
@@ -976,8 +1018,12 @@ export class TemplateBase
    */
   private runInNewStackTraceContext<T>(fn: () => T): T {
     this.disableStackTrace()
-    const result = fn()
-    this.enableStackTrace()
+    let result: T
+    try {
+      result = fn()
+    } finally {
+      this.enableStackTrace()
+    }
     this.collectStackTrace(STACK_TRACE_DEPTH + 1)
     return result
   }
@@ -987,9 +1033,11 @@ export class TemplateBase
     stackTraceOverride: string | undefined
   ): T {
     this.stackTracesOverride = stackTraceOverride
-    const result = fn()
-    this.stackTracesOverride = undefined
-    return result
+    try {
+      return fn()
+    } finally {
+      this.stackTracesOverride = undefined
+    }
   }
 
   /**
@@ -1066,6 +1114,7 @@ export class TemplateBase
    */
   private async build(
     client: ApiClient,
+    config: ConnectionConfig,
     name: string,
     options: Omit<BuildOptions, 'alias'>
   ): Promise<BuildInfo> {
@@ -1086,12 +1135,16 @@ export class TemplateBase
       templateID,
       buildID,
       tags: responseTags,
-    } = await requestBuild(client, {
-      name,
-      tags: options.tags,
-      cpuCount: options.cpuCount ?? 2,
-      memoryMB: options.memoryMB ?? 1024,
-    })
+    } = await requestBuild(
+      client,
+      {
+        name,
+        tags: options.tags,
+        cpuCount: options.cpuCount ?? 2,
+        memoryMB: options.memoryMB ?? 1024,
+      },
+      config.getSignal(undefined, options.signal)
+    )
 
     options.onBuildLogs?.(
       new LogEntry(
@@ -1128,7 +1181,8 @@ export class TemplateBase
             templateID,
             filesHash,
           },
-          stackTrace
+          stackTrace,
+          config.getSignal(undefined, options.signal)
         )
 
         if (
@@ -1145,8 +1199,17 @@ export class TemplateBase
                 ...readDockerignore(this.fileContextPath.toString()),
               ],
               resolveSymlinks: instruction.resolveSymlinks ?? RESOLVE_SYMLINKS,
+              gzip: instruction.gzip ?? GZIP,
             },
-            stackTrace
+            stackTrace,
+            // Forward `requestTimeoutMs` only when the caller set it — we
+            // never want to slap the 60s default on a multi-hundred-MB S3
+            // upload, but a user-set per-build timeout should govern the
+            // whole operation, including uploads.
+            {
+              signal: options.signal,
+              requestTimeoutMs: options.requestTimeoutMs,
+            }
           )
           options.onBuildLogs?.(
             new LogEntry(new Date(), 'info', `Uploaded '${src}'`)
@@ -1174,11 +1237,15 @@ export class TemplateBase
       new LogEntry(new Date(), 'info', 'Starting building...')
     )
 
-    await triggerBuild(client, {
-      templateID,
-      buildID,
-      template: this.serialize(instructionsWithHashes),
-    })
+    await triggerBuild(
+      client,
+      {
+        templateID,
+        buildID,
+        template: this.serialize(instructionsWithHashes),
+      },
+      config.getSignal(undefined, options.signal)
+    )
 
     return {
       alias: name,

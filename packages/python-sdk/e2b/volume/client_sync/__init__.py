@@ -1,16 +1,16 @@
-import logging
 import os
-from typing import Optional
+import threading
+from typing import Dict, Optional
 
 import httpx
 from httpx import Limits
+from httpx._types import ProxyTypes
 
+from e2b.api import connection_retries, make_logging_event_hooks
 from e2b.api.metadata import default_headers
 from e2b.exceptions import AuthenticationException
 from e2b.volume.client.client import AuthenticatedClient as VolumeApiClient
 from e2b.volume.connection_config import VolumeConnectionConfig
-
-logger = logging.getLogger(__name__)
 
 limits = Limits(
     max_keepalive_connections=int(os.getenv("E2B_MAX_KEEPALIVE_CONNECTIONS", "20")),
@@ -18,12 +18,15 @@ limits = Limits(
     keepalive_expiry=int(os.getenv("E2B_KEEPALIVE_EXPIRY", "300")),
 )
 
+TransportKey = Optional[ProxyTypes]
+
 
 def get_api_client(config: VolumeConnectionConfig, **kwargs) -> VolumeApiClient:
     if config.access_token is None:
         raise AuthenticationException(
-            "Access token is required for volume operations. "
-            "Set `E2B_ACCESS_TOKEN` or pass `token` in options.",
+            "Volume token is required for volume content operations. "
+            "Use `Volume.create`/`Volume.connect` to obtain it "
+            "or pass `token` in options.",
         )
 
     headers = {
@@ -31,26 +34,29 @@ def get_api_client(config: VolumeConnectionConfig, **kwargs) -> VolumeApiClient:
         **(config.headers or {}),
     }
 
+    request_timeout = config.request_timeout
+
     return VolumeApiClient(
         base_url=config.api_url,
         token=config.access_token,
         auth_header_name="Authorization",
         prefix="Bearer",
         headers=headers,
-        httpx_args={"proxy": config.proxy, "transport": get_transport(config)},
+        timeout=(
+            httpx.Timeout(request_timeout) if request_timeout is not None else None
+        ),
+        httpx_args={
+            # The proxy lives in the cached transport; passing `proxy` here too
+            # would mount a fresh, never-closed proxy transport per client.
+            "transport": get_transport(config),
+            "event_hooks": make_logging_event_hooks(config.logger),
+        },
         **kwargs,
     )
 
 
 class TransportWithLogger(httpx.HTTPTransport):
-    singleton: Optional["TransportWithLogger"] = None
-
-    def handle_request(self, request):
-        url = f"{request.url.scheme}://{request.url.host}{request.url.path}"
-        logger.info(f"Request: {request.method} {url}")
-        response = super().handle_request(request)
-        logger.info(f"Response: {response.status_code} {url}")
-        return response
+    _thread_local = threading.local()
 
     @property
     def pool(self):
@@ -58,12 +64,19 @@ class TransportWithLogger(httpx.HTTPTransport):
 
 
 def get_transport(config: VolumeConnectionConfig) -> TransportWithLogger:
-    if TransportWithLogger.singleton is not None:
-        return TransportWithLogger.singleton
+    instances: Dict[TransportKey, TransportWithLogger] = getattr(
+        TransportWithLogger._thread_local, "instances", {}
+    )
+    key: TransportKey = config.proxy
+    cached = instances.get(key)
+    if cached is not None:
+        return cached
 
     transport = TransportWithLogger(
         limits=limits,
         proxy=config.proxy,
+        retries=connection_retries,
     )
-    TransportWithLogger.singleton = transport
+    instances[key] = transport
+    TransportWithLogger._thread_local.instances = instances
     return transport

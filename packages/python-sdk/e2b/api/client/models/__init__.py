@@ -46,6 +46,8 @@ from .resumed_sandbox import ResumedSandbox
 from .sandbox import Sandbox
 from .sandbox_auto_resume_config import SandboxAutoResumeConfig
 from .sandbox_detail import SandboxDetail
+from .sandbox_fork_request import SandboxForkRequest
+from .sandbox_fork_result import SandboxForkResult
 from .sandbox_lifecycle import SandboxLifecycle
 from .sandbox_log import SandboxLog
 from .sandbox_log_entry import SandboxLogEntry
@@ -54,7 +56,14 @@ from .sandbox_logs import SandboxLogs
 from .sandbox_logs_v2_response import SandboxLogsV2Response
 from .sandbox_metric import SandboxMetric
 from .sandbox_network_config import SandboxNetworkConfig
+from .sandbox_network_config_rules import SandboxNetworkConfigRules
+from .sandbox_network_rule import SandboxNetworkRule
+from .sandbox_network_transform import SandboxNetworkTransform
+from .sandbox_network_transform_headers import SandboxNetworkTransformHeaders
+from .sandbox_network_update_config import SandboxNetworkUpdateConfig
+from .sandbox_network_update_config_rules import SandboxNetworkUpdateConfigRules
 from .sandbox_on_timeout import SandboxOnTimeout
+from .sandbox_pause_request import SandboxPauseRequest
 from .sandbox_state import SandboxState
 from .sandbox_volume_mount import SandboxVolumeMount
 from .sandboxes_with_metrics import SandboxesWithMetrics
@@ -130,6 +139,8 @@ __all__ = (
     "SandboxAutoResumeConfig",
     "SandboxDetail",
     "SandboxesWithMetrics",
+    "SandboxForkRequest",
+    "SandboxForkResult",
     "SandboxLifecycle",
     "SandboxLog",
     "SandboxLogEntry",
@@ -138,7 +149,14 @@ __all__ = (
     "SandboxLogsV2Response",
     "SandboxMetric",
     "SandboxNetworkConfig",
+    "SandboxNetworkConfigRules",
+    "SandboxNetworkRule",
+    "SandboxNetworkTransform",
+    "SandboxNetworkTransformHeaders",
+    "SandboxNetworkUpdateConfig",
+    "SandboxNetworkUpdateConfigRules",
     "SandboxOnTimeout",
+    "SandboxPauseRequest",
     "SandboxState",
     "SandboxVolumeMount",
     "SnapshotInfo",

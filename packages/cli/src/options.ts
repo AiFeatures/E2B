@@ -1,6 +1,22 @@
 import * as commander from 'commander'
 
-import { asBold } from './utils/format'
+import { asBold, asLocal } from './utils/format'
+
+/**
+ * Parse a CLI option as a positive integer, rejecting non-numeric values so
+ * they don't silently become NaN.
+ */
+export function parsePositiveInt(label: string): (value: string) => number {
+  return (value) => {
+    const parsed = Number(value)
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      throw new commander.InvalidArgumentError(
+        `${label} must be a positive integer. You provided ${asLocal(value)}.`
+      )
+    }
+    return parsed
+  }
+}
 
 export const pathOption = new commander.Option(
   '-p, --path <path>',
@@ -14,11 +30,6 @@ export const configOption = new commander.Option(
   `specify path to the E2B config toml. By default E2B tries to find ${asBold(
     './e2b.toml'
   )} in root directory. We recommend using the new build system (https://e2b.dev/docs/template/defining-template) that does not use config files.`
-)
-
-export const selectOption = new commander.Option(
-  '-s, --select',
-  'select multiple sandbox templates from interactive list'
 )
 
 export const selectMultipleOption = new commander.Option(

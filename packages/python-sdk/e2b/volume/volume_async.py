@@ -3,6 +3,7 @@ from http import HTTPStatus
 
 import httpx
 
+from httpx._types import ProxyTypes
 from typing_extensions import Unpack
 
 from e2b.api import handle_api_exception
@@ -45,6 +46,7 @@ from e2b.volume.types import (
     VolumeInfo,
     VolumeEntryStat,
 )
+from e2b.io_utils import aiter_io_chunks
 from e2b.volume.utils import DualMethod, convert_volume_entry_stat
 
 
@@ -58,12 +60,14 @@ class AsyncVolume:
         token: Optional[str] = None,
         domain: Optional[str] = None,
         debug: Optional[bool] = None,
+        proxy: Optional[ProxyTypes] = None,
     ):
         self._volume_id = volume_id
         self._name = name
         self._token = token
         self._domain = domain
         self._debug = debug
+        self._proxy = proxy
 
     @property
     def volume_id(self) -> str:
@@ -87,7 +91,8 @@ class AsyncVolume:
             api_url=opts.get("api_url"),
             request_timeout=opts.get("request_timeout"),
             headers=opts.get("headers"),
-            proxy=opts.get("proxy"),
+            logger=opts.get("logger"),
+            proxy=opts.get("proxy") if opts.get("proxy") is not None else self._proxy,
         )
 
     @classmethod
@@ -122,6 +127,7 @@ class AsyncVolume:
             token=res.parsed.token,
             domain=config.domain,
             debug=config.debug,
+            proxy=config.proxy,
         )
         return vol
 
@@ -142,6 +148,7 @@ class AsyncVolume:
             token=info.token,
             domain=config.domain,
             debug=config.debug,
+            proxy=config.proxy,
         )
 
     @staticmethod
@@ -439,6 +446,7 @@ class AsyncVolume:
         self,
         path: str,
         format: Literal["stream"],
+        stream_idle_timeout: Optional[float] = None,
         **opts: Unpack[VolumeApiParams],
     ) -> AsyncIterator[bytes]: ...
 
@@ -446,6 +454,7 @@ class AsyncVolume:
         self,
         path: str,
         format: Literal["text", "bytes", "stream"] = "text",
+        stream_idle_timeout: Optional[float] = None,
         **opts: Unpack[VolumeApiParams],
     ) -> Union[str, bytes, AsyncIterator[bytes]]:
         """
@@ -455,6 +464,11 @@ class AsyncVolume:
 
         :param path: Path to the file
         :param format: Format of the file content—`text` by default
+        :param stream_idle_timeout: Idle timeout in **seconds** for a streamed
+            read (`format="stream"`)—abort if no chunk arrives within this
+            window while reading. Resets on every chunk, so it bounds a stalled
+            stream without limiting total transfer time. Defaults to the request
+            timeout; pass `0` to disable.
         :param opts: Connection options
 
         :return: File content as string, bytes, or async iterator of bytes
@@ -468,13 +482,23 @@ class AsyncVolume:
         )
 
         if format == "stream":
+            # The request timeout bounds connection setup, not total transfer;
+            # consuming the body must not be killed by it. httpx's per-chunk
+            # `read` timeout becomes the idle-read timeout for the body
+            # (defaults to the request timeout), bounding a stalled stream
+            # without limiting total transfer time. Pass `0` to disable.
+            # Mirrors the sandbox files stream path.
+            idle_timeout = (
+                timeout if stream_idle_timeout is None else stream_idle_timeout
+            )
+            stream_timeout = httpx.Timeout(timeout, read=idle_timeout or None)
 
             async def stream_file() -> AsyncIterator[bytes]:
                 async with api_client.get_async_httpx_client().stream(
                     method="GET",
                     url=f"/volumecontent/{self._volume_id}/file",
                     params=params,
-                    timeout=timeout,
+                    timeout=stream_timeout,
                 ) as response:
                     if response.status_code == 404:
                         raise NotFoundException(f"Path {path} not found")
@@ -520,7 +544,7 @@ class AsyncVolume:
     async def write_file(
         self,
         path: str,
-        data: Union[str, bytes, IO[bytes]],
+        data: Union[str, bytes, IO],
         uid: Optional[int] = None,
         gid: Optional[int] = None,
         mode: Optional[int] = None,
@@ -534,7 +558,7 @@ class AsyncVolume:
         Writing to a file that already exists overwrites the file.
 
         :param path: Path to the file
-        :param data: Data to write to the file. Data can be a string, bytes, or IO.
+        :param data: Data to write to the file. Data can be a string, bytes, or IO. File-like objects are streamed in chunks instead of being buffered in memory.
         :param uid: User ID of the created file
         :param gid: Group ID of the created file
         :param mode: Mode of the created file
@@ -551,22 +575,21 @@ class AsyncVolume:
         if upload_timeout is not None:
             api_client = api_client.with_timeout(httpx.Timeout(upload_timeout))
 
+        content: Union[bytes, AsyncIterator[bytes]]
         if isinstance(data, str):
-            data_bytes = data.encode("utf-8")
+            content = data.encode("utf-8")
         elif isinstance(data, bytes):
-            data_bytes = data
+            content = data
         elif hasattr(data, "read"):
-            content = data.read()
-            if isinstance(content, bytes):
-                data_bytes = content
-            else:
-                data_bytes = content.encode("utf-8")
+            # Stream file-like objects in chunks without buffering them in
+            # memory. Async httpx requires an async iterable request body.
+            content = aiter_io_chunks(data)
         else:
             raise ValueError(f"Unsupported data type: {type(data)}")
 
         res = await put_file.asyncio_detailed(
             self._volume_id,
-            body=FilePayload(payload=data_bytes),  # type: ignore[arg-type]  # Pass bytes directly for async httpx compatibility
+            body=FilePayload(payload=content),  # type: ignore[arg-type]  # httpx accepts bytes and streamable content directly
             path=path,
             uid=uid if uid is not None else UNSET,
             gid=gid if gid is not None else UNSET,

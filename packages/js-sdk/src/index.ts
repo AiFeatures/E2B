@@ -2,7 +2,11 @@ export { ApiClient } from './api'
 export type { components, paths } from './api'
 
 export { ConnectionConfig } from './connectionConfig'
-export type { ConnectionOpts, Username } from './connectionConfig'
+export type {
+  ConnectionConfigOpts,
+  ConnectionOpts,
+  Username,
+} from './connectionConfig'
 export {
   AuthenticationError,
   FileNotFoundError,
@@ -52,17 +56,28 @@ export type {
   SandboxOpts,
   SandboxApiOpts,
   SandboxConnectOpts,
-  SandboxBetaCreateOpts,
+  SandboxForkOpts,
   SandboxMetricsOpts,
+  SandboxPauseOpts,
   SandboxState,
   SandboxListOpts,
   SandboxPaginator,
   SandboxNetworkOpts,
+  SandboxNetworkInfo,
+  SandboxNetworkSelector,
+  SandboxNetworkSelectorContext,
+  SandboxNetworkRule,
+  SandboxNetworkRuleInfo,
+  SandboxNetworkRules,
+  SandboxNetworkTransform,
+  SandboxNetworkUpdate,
+  SandboxOnTimeout,
   SandboxLifecycle,
   SandboxInfoLifecycle,
   SnapshotInfo,
   SnapshotListOpts,
   SnapshotPaginator,
+  CreateSnapshotOpts,
 } from './sandbox/sandboxApi'
 
 export type { McpServer } from './sandbox/mcp'
@@ -102,10 +117,14 @@ export type {
   VolumeInfo,
   VolumeAndToken,
   VolumeEntryStat,
-  VolumeMetadataOptions,
-  VolumeWriteOptions,
+  VolumeMetadataOpts,
+  VolumeReadOpts,
+  VolumeWriteOpts,
   VolumeApiOpts,
   VolumeConnectionConfig,
+  // Deprecated aliases, kept for backwards compatibility.
+  VolumeMetadataOptions,
+  VolumeWriteOptions,
 } from './volume'
 
 export { Sandbox }

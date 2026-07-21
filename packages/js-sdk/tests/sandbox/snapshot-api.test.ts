@@ -141,6 +141,52 @@ sandboxTest.skipIf(isDebug)(
   }
 )
 
+sandboxTest.skipIf(isDebug)(
+  'create a named snapshot',
+  async ({ sandbox, sandboxTestId }) => {
+    const snapshotName = `snap-${sandboxTestId}`
+
+    const snapshot = await sandbox.createSnapshot({ name: snapshotName })
+
+    try {
+      assert.isString(snapshot.snapshotId)
+      assert.isArray(snapshot.names)
+      assert.isTrue(snapshot.names.length > 0)
+      assert.isTrue(snapshot.names.some((n) => n.includes(snapshotName)))
+    } finally {
+      await Sandbox.deleteSnapshot(snapshot.snapshotId)
+    }
+  }
+)
+
+sandboxTest.skipIf(isDebug)(
+  'list snapshots filtered by name',
+  async ({ sandbox, sandboxTestId }) => {
+    const snapshotName = `snap-filter-${sandboxTestId}`
+
+    const snapshot = await sandbox.createSnapshot({ name: snapshotName })
+
+    try {
+      // Filtering by the snapshot name should return the snapshot
+      const paginator = Sandbox.listSnapshots({ name: snapshotName })
+      const snapshots = await paginator.nextItems()
+
+      const found = snapshots.find((s) => s.snapshotId === snapshot.snapshotId)
+      assert.isDefined(found)
+
+      // Filtering by an unknown name should return an empty list
+      const emptyPaginator = Sandbox.listSnapshots({
+        name: `${snapshotName}-does-not-exist`,
+      })
+      const emptySnapshots = await emptyPaginator.nextItems()
+      assert.isArray(emptySnapshots)
+      assert.equal(emptySnapshots.length, 0)
+    } finally {
+      await Sandbox.deleteSnapshot(snapshot.snapshotId)
+    }
+  }
+)
+
 sandboxTest.skipIf(isDebug)('delete snapshot', async ({ sandbox }) => {
   const snapshot = await sandbox.createSnapshot()
 

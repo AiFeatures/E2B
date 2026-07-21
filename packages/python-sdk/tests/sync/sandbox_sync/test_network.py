@@ -1,14 +1,41 @@
+import json
+import time
+
+import httpx
+
 import pytest
 
-from e2b import ALL_TRAFFIC, SandboxNetworkOpts
+from e2b import SandboxNetworkOpts
 from e2b.sandbox.commands.command_handle import CommandExitException
+
+
+def wait_for_status(
+    client: httpx.Client,
+    url: str,
+    status_code: int,
+    headers: dict[str, str] | None = None,
+    timeout: float = 15,
+) -> httpx.Response:
+    deadline = time.monotonic() + timeout
+    response: httpx.Response | None = None
+
+    while time.monotonic() < deadline:
+        response = client.get(url, headers=headers, follow_redirects=True)
+        if response.status_code == status_code:
+            return response
+        time.sleep(1)
+
+    assert response is not None
+    return response
 
 
 @pytest.mark.skip_debug()
 def test_allow_specific_ip_with_deny_all(sandbox_factory):
     """Test that sandbox with denyOut all and allowOut creates a whitelist."""
     sandbox = sandbox_factory(
-        network=SandboxNetworkOpts(deny_out=[ALL_TRAFFIC], allow_out=["1.1.1.1"])
+        network=SandboxNetworkOpts(
+            deny_out=lambda ctx: [ctx.all_traffic], allow_out=["1.1.1.1"]
+        )
     )
 
     # Test that allowed IP works
@@ -48,9 +75,9 @@ def test_deny_specific_ip(sandbox_factory):
 
 @pytest.mark.skip_debug()
 def test_deny_all_traffic(sandbox_factory):
-    """Test that sandbox can deny all traffic using all_traffic helper."""
+    """Test that sandbox can deny all traffic using the all_traffic selector."""
     sandbox = sandbox_factory(
-        network=SandboxNetworkOpts(deny_out=[ALL_TRAFFIC]), timeout=30
+        network=SandboxNetworkOpts(deny_out=lambda ctx: [ctx.all_traffic]), timeout=30
     )
 
     # Test that all traffic is denied
@@ -72,7 +99,7 @@ def test_allow_takes_precedence_over_deny(sandbox_factory):
     """Test that allowOut takes precedence over denyOut."""
     sandbox = sandbox_factory(
         network=SandboxNetworkOpts(
-            deny_out=[ALL_TRAFFIC], allow_out=["1.1.1.1", "8.8.8.8"]
+            deny_out=lambda ctx: [ctx.all_traffic], allow_out=["1.1.1.1", "8.8.8.8"]
         )
     )
 
@@ -98,10 +125,6 @@ def test_allow_public_traffic_false(sandbox_factory):
         secure=True, network=SandboxNetworkOpts(allow_public_traffic=False)
     )
 
-    import time
-
-    import httpx
-
     # Verify the sandbox was created successfully and has a traffic access token
     assert sandbox.traffic_access_token is not None
 
@@ -125,7 +148,7 @@ def test_allow_public_traffic_false(sandbox_factory):
 
         # Test 2: Request with valid traffic access token should succeed
         headers = {"e2b-traffic-access-token": sandbox.traffic_access_token}
-        response = client.get(sandbox_url, headers=headers, follow_redirects=True)
+        response = wait_for_status(client, sandbox_url, 200, headers=headers)
         assert response.status_code == 200
 
 
@@ -133,10 +156,6 @@ def test_allow_public_traffic_false(sandbox_factory):
 def test_allow_public_traffic_true(sandbox_factory):
     """Test that sandbox with allow_public_traffic=True works without token."""
     sandbox = sandbox_factory(network=SandboxNetworkOpts(allow_public_traffic=True))
-
-    import time
-
-    import httpx
 
     # Start a simple HTTP server in the sandbox
     port = 8080
@@ -153,8 +172,89 @@ def test_allow_public_traffic_true(sandbox_factory):
 
     with httpx.Client() as client:
         # Request without traffic access token should succeed (public access enabled)
-        response = client.get(sandbox_url, follow_redirects=True)
+        response = wait_for_status(client, sandbox_url, 200)
         assert response.status_code == 200
+
+
+@pytest.mark.skip_debug()
+def test_firewall_transform_injects_headers(sandbox_factory):
+    """Test that a firewall rule with a transform injects headers into outbound requests."""
+    injected_header = "X-E2B-Test-Token"
+    injected_value = "e2b-transform-value-123"
+
+    network: SandboxNetworkOpts = {
+        "rules": {
+            "httpbin.e2b.team": [
+                {"transform": {"headers": {injected_header: injected_value}}},
+            ],
+        },
+    }
+    sandbox = sandbox_factory(network=network)
+
+    result = sandbox.commands.run(
+        "curl -sS --max-time 10 https://httpbin.e2b.team/headers"
+    )
+    assert result.exit_code == 0
+
+    parsed = json.loads(result.stdout)
+    reflected = parsed["headers"].get(injected_header)
+    assert reflected == injected_value, (
+        f"expected httpbin to reflect {injected_header}={injected_value}, "
+        f"got headers: {parsed['headers']}"
+    )
+
+
+@pytest.mark.skip_debug()
+def test_update_network_applies_restrictions(sandbox_factory):
+    """update_network can add egress restrictions to a running sandbox."""
+    sandbox = sandbox_factory()
+
+    # Baseline: 8.8.8.8 reachable.
+    before = sandbox.commands.run(
+        "curl -s -o /dev/null -w '%{http_code}' https://8.8.8.8"
+    )
+    assert before.exit_code == 0
+
+    sandbox.update_network({"deny_out": ["8.8.8.8"]})
+
+    # 8.8.8.8 is now denied.
+    with pytest.raises(CommandExitException) as exc_info:
+        sandbox.commands.run(
+            "curl --connect-timeout 3 --max-time 5 -Is https://8.8.8.8"
+        )
+    assert exc_info.value.exit_code != 0
+
+    # Other destinations stay reachable.
+    result = sandbox.commands.run(
+        "curl -s -o /dev/null -w '%{http_code}' https://1.1.1.1"
+    )
+    assert result.exit_code == 0
+
+
+@pytest.mark.skip_debug()
+def test_update_network_clears_existing_rules(sandbox_factory):
+    """update_network replaces all egress rules; omitted fields are cleared."""
+    sandbox = sandbox_factory(
+        network=SandboxNetworkOpts(
+            deny_out=lambda ctx: [ctx.all_traffic],
+            allow_out=["1.1.1.1"],
+        )
+    )
+
+    # Baseline from create-time config: 8.8.8.8 denied.
+    with pytest.raises(CommandExitException):
+        sandbox.commands.run(
+            "curl --connect-timeout 3 --max-time 5 -Is https://8.8.8.8"
+        )
+
+    # Empty update clears allow_out / deny_out entirely.
+    sandbox.update_network({})
+
+    r1 = sandbox.commands.run("curl -s -o /dev/null -w '%{http_code}' https://1.1.1.1")
+    assert r1.exit_code == 0
+
+    r2 = sandbox.commands.run("curl -s -o /dev/null -w '%{http_code}' https://8.8.8.8")
+    assert r2.exit_code == 0
 
 
 @pytest.mark.skip_debug()

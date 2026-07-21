@@ -192,6 +192,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sandboxes/{sandboxID}/fork": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Fork sandbox
+         * @description Fork the sandbox: checkpoint the running sandbox in place (it is briefly paused, snapshotted with its full memory state, and resumed on its node, keeping its ID and expiration untouched) and create count new sandboxes from that snapshot. Returns one result per requested fork, each carrying either the created sandbox or the error that prevented it from starting. A non-201 status means the request failed before any fork was attempted.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sandboxID: components["parameters"]["sandboxID"];
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["SandboxForkRequest"];
+                };
+            };
+            responses: {
+                /** @description The sandbox was snapshotted and the forks were attempted; each entry reports one fork's outcome */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SandboxForkResult"][];
+                    };
+                };
+                401: components["responses"]["401"];
+                404: components["responses"]["404"];
+                409: components["responses"]["409"];
+                500: components["responses"]["500"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sandboxes/{sandboxID}/logs": {
         parameters: {
             query?: never;
@@ -287,6 +336,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sandboxes/{sandboxID}/network": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** @description Update the network configuration for a running sandbox. Replaces the current egress rules with the provided configuration. Omitting field clears it. */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sandboxID: components["parameters"]["sandboxID"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SandboxNetworkUpdateConfig"];
+                };
+            };
+            responses: {
+                /** @description Successfully updated the sandbox network configuration */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["401"];
+                404: components["responses"]["404"];
+                409: components["responses"]["409"];
+                500: components["responses"]["500"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sandboxes/{sandboxID}/pause": {
         parameters: {
             query?: never;
@@ -306,7 +399,11 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["SandboxPauseRequest"];
+                };
+            };
             responses: {
                 /** @description The sandbox was paused successfully and can be resumed */
                 204: {
@@ -574,6 +671,7 @@ export interface paths {
                 query?: {
                     /** @description Maximum number of items to return per page */
                     limit?: components["parameters"]["paginationLimit"];
+                    name?: string;
                     /** @description Cursor to start the list from */
                     nextToken?: components["parameters"]["paginationNextToken"];
                     sandboxID?: string;
@@ -1541,6 +1639,7 @@ export interface paths {
                 };
                 400: components["responses"]["400"];
                 401: components["responses"]["401"];
+                403: components["responses"]["403"];
                 500: components["responses"]["500"];
             };
         };
@@ -1964,6 +2063,11 @@ export interface components {
              * @default false
              */
             autoPause?: boolean;
+            /**
+             * @description Controls the snapshot kind taken when the sandbox auto-pauses on timeout (only relevant when autoPause is true). When false, the auto-pause drops the in-memory state and persists only the filesystem (a filesystem-only snapshot); resuming it cold-boots (reboots) the sandbox from disk. Such a snapshot cannot be auto-resumed by traffic and must be resumed explicitly, so it cannot be combined with autoResume. Defaults to true (full memory snapshot).
+             * @default true
+             */
+            autoPauseMemory?: boolean;
             autoResume?: components["schemas"]["SandboxAutoResumeConfig"];
             envVars?: components["schemas"]["EnvVars"];
             mcp?: components["schemas"]["Mcp"];
@@ -2092,10 +2196,13 @@ export interface components {
             memoryUsedBytes: number;
         };
         /**
-         * @description Status of the node
+         * @description Status of the node.
+         *     - draining: the node is bound to be shut down. It will not accept new sandboxes and will stop once all existing sandboxes are done.
+         *     - standby: the node is not actively used, but it can return to ready and continue serving traffic.
+         *
          * @enum {string}
          */
-        NodeStatus: "ready" | "draining" | "connecting" | "unhealthy";
+        NodeStatus: "ready" | "draining" | "connecting" | "unhealthy" | "standby";
         NodeStatusChange: {
             /**
              * Format: uuid
@@ -2189,6 +2296,25 @@ export interface components {
                 [key: string]: components["schemas"]["SandboxMetric"];
             };
         };
+        SandboxForkRequest: {
+            /**
+             * Format: int32
+             * @description Number of forked sandboxes to create. All forks boot from the same snapshot, so the snapshot is captured once regardless of count. Each fork succeeds or fails independently; the outcome of each is reported in its entry of the response list.
+             * @default 1
+             */
+            count?: number;
+            /**
+             * Format: int32
+             * @description Time to live for the new forked sandboxes in seconds.
+             * @default 15
+             */
+            timeout?: number;
+        };
+        /** @description Result of one requested fork. Exactly one of sandbox or error is set: sandbox when the fork started successfully, error when it failed to start. */
+        SandboxForkResult: {
+            error?: components["schemas"]["Error"];
+            sandbox?: components["schemas"]["Sandbox"];
+        };
         /** @description Sandbox lifecycle policy returned by sandbox info. */
         SandboxLifecycle: {
             /** @description Whether the sandbox can auto-resume. */
@@ -2258,6 +2384,11 @@ export interface components {
             diskUsed: number;
             /**
              * Format: int64
+             * @description Cached memory (page cache) in bytes
+             */
+            memCache: number;
+            /**
+             * Format: int64
              * @description Total memory in bytes
              */
             memTotal: number;
@@ -2279,23 +2410,60 @@ export interface components {
             timestampUnix: number;
         };
         SandboxNetworkConfig: {
-            /** @description List of allowed CIDR blocks or IP addresses for egress traffic. Allowed addresses always take precedence over blocked addresses. */
+            /** @description List of allowed destinations for egress traffic. Each entry can be a CIDR block (e.g. "8.8.8.8/32"), a bare IP address (e.g. "8.8.8.8"), or a domain name (e.g. "example.com", "*.example.com"). Allowed entries always take precedence over denied entries. */
             allowOut?: string[];
             /**
              * @description Specify if the sandbox URLs should be accessible only with authentication.
              * @default true
              */
             allowPublicTraffic?: boolean;
-            /** @description List of denied CIDR blocks or IP addresses for egress traffic */
+            /** @description List of denied CIDR blocks or IP addresses for egress traffic. Domain names are not supported for deny rules. */
             denyOut?: string[];
             /** @description Specify host mask which will be used for all sandbox requests */
             maskRequestHost?: string;
+            /** @description Per-domain transform rules applied to matching egress HTTP/HTTPS requests. Keys are domains (e.g. "api.example.com", "example.com"). A domain listed here is not automatically allowed - use allowOut to permit the traffic.
+             *      */
+            rules?: {
+                [key: string]: components["schemas"]["SandboxNetworkRule"][];
+            };
+        };
+        /** @description Transform rule applied to egress requests matching a domain pattern. */
+        SandboxNetworkRule: {
+            transform?: components["schemas"]["SandboxNetworkTransform"];
+        };
+        /** @description Transformations applied to matching egress requests before forwarding. */
+        SandboxNetworkTransform: {
+            /** @description HTTP headers to inject or override in matching requests. An existing header with the same name is replaced. Values are plain strings; secret resolution happens client-side before sending to the API.
+             *      */
+            headers?: {
+                [key: string]: string;
+            };
+        };
+        /** @description Network configuration update for a running sandbox. Replaces the current egress rules with the provided configuration. Omitting a field clears it. */
+        SandboxNetworkUpdateConfig: {
+            /** @description Allow sandbox to access the internet. When set to false, it behaves the same as specifying denyOut to 0.0.0.0/0 in the network config. */
+            allow_internet_access?: boolean;
+            /** @description List of allowed destinations for egress traffic. Each entry can be a CIDR block (e.g. "8.8.8.8/32"), a bare IP address (e.g. "8.8.8.8"), or a domain name (e.g. "example.com", "*.example.com"). Allowed entries always take precedence over denied entries. */
+            allowOut?: string[];
+            /** @description List of denied CIDR blocks or IP addresses for egress traffic. Domain names are not supported for deny rules. */
+            denyOut?: string[];
+            /** @description Per-domain transform rules. Replaces all existing rules when provided. */
+            rules?: {
+                [key: string]: components["schemas"]["SandboxNetworkRule"][];
+            };
         };
         /**
          * @description Action taken when the sandbox times out.
          * @enum {string}
          */
         SandboxOnTimeout: "kill" | "pause";
+        SandboxPauseRequest: {
+            /**
+             * @description Whether to capture a full memory snapshot. When false, only the filesystem is persisted and resuming the sandbox cold-boots (reboots) it from disk, losing in-memory state, running processes, and open connections. Resume it with an explicit request (connect or resume); auto-resume, which can be triggered by arbitrary traffic, refuses such a sandbox. Defaults to true.
+             * @default true
+             */
+            memory?: boolean;
+        };
         /**
          * @description State of the sandbox
          * @enum {string}
@@ -2369,8 +2537,12 @@ export interface components {
             timestampUnix: number;
         };
         TeamUser: {
-            /** @description Email of the user */
-            email: string;
+            /**
+             * @deprecated
+             * @description Email of the user
+             * @default null
+             */
+            email: string | null;
             /**
              * Format: uuid
              * @description Identifier of the user
