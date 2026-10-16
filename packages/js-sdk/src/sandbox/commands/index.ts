@@ -21,8 +21,10 @@ import {
   handleProcessStartEvent,
 } from '../../envd/api'
 import {
+  ConnectResponse,
   Process as ProcessService,
   Signal,
+  StartResponse,
 } from '../../envd/process/process_pb'
 import {
   authenticationHeader,
@@ -37,8 +39,9 @@ export { Pty } from './pty'
 /**
  * Options for sending a command request.
  */
-export interface CommandRequestOpts
-  extends Partial<Pick<ConnectionOpts, 'requestTimeoutMs' | 'signal'>> {}
+export interface CommandRequestOpts extends Partial<
+  Pick<ConnectionOpts, 'requestTimeoutMs' | 'signal'>
+> {}
 
 /**
  * Options for starting a new command.
@@ -349,26 +352,7 @@ export class Commands {
       }
     )
 
-    try {
-      const pid = await handleProcessStartEvent(events)
-      clearStartTimeout()
-
-      return new CommandHandle(
-        pid,
-        cleanup,
-        () => this.kill(pid),
-        events,
-        opts?.onStdout,
-        opts?.onStderr,
-        undefined,
-        (data, stdinOpts) => this.sendStdin(pid, data, stdinOpts),
-        (stdinOpts) => this.closeStdin(pid, stdinOpts),
-        this.checkHealth
-      )
-    } catch (err) {
-      cleanup()
-      throw await handleRpcErrorWithHealthCheck(err, this.checkHealth)
-    }
+    return this.createHandle(events, clearStartTimeout, cleanup, opts)
   }
 
   /**
@@ -464,6 +448,15 @@ export class Commands {
       }
     )
 
+    return this.createHandle(events, clearStartTimeout, cleanup, opts)
+  }
+
+  private async createHandle(
+    events: AsyncIterable<StartResponse | ConnectResponse>,
+    clearStartTimeout: () => void,
+    cleanup: () => void,
+    opts?: Pick<CommandStartOpts, 'onStdout' | 'onStderr'>
+  ): Promise<CommandHandle> {
     try {
       const pid = await handleProcessStartEvent(events)
       clearStartTimeout()

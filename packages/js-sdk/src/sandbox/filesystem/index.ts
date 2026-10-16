@@ -52,6 +52,7 @@ import {
   InvalidArgumentError,
   TemplateError,
 } from '../../errors'
+import { isReadableStreamLike } from '../../is'
 import { runtime, toBlob, toUploadBody } from '../../utils'
 
 const FILESYSTEM_HTTP_ERROR_MAP: Record<number, (message: string) => Error> = {
@@ -239,7 +240,9 @@ function metadataHeaders(
 export function mapEntryInfo(entry: FsEntryInfo): EntryInfo {
   return {
     name: entry.name,
-    type: mapFileType(entry.type),
+    // Newer envd reports a symlink's target type in `type` and marks the link
+    // itself with `isSymlink`; older envd reports FILE_TYPE_SYMLINK in `type`.
+    type: entry.isSymlink ? FileType.SYMLINK : mapFileType(entry.type),
     path: entry.path,
     size: Number(entry.size),
     mode: entry.mode,
@@ -255,8 +258,9 @@ export function mapEntryInfo(entry: FsEntryInfo): EntryInfo {
 /**
  * Options for the sandbox filesystem operations.
  */
-export interface FilesystemRequestOpts
-  extends Partial<Pick<ConnectionOpts, 'requestTimeoutMs' | 'signal'>> {
+export interface FilesystemRequestOpts extends Partial<
+  Pick<ConnectionOpts, 'requestTimeoutMs' | 'signal'>
+> {
   /**
    * User to use for the operation in the sandbox.
    * This affects the resolution of relative paths and ownership of the created filesystem objects.
@@ -337,6 +341,9 @@ export interface WatchOpts extends FilesystemRequestOpts {
   timeoutMs?: number
   /**
    * Callback to call when the watch operation stops.
+   *
+   * `err` is `undefined` after {@link WatchHandle.stop} or a clean stream end,
+   * and is set only when the watch fails.
    */
   onExit?: (err?: Error) => void | Promise<void>
   /**
@@ -596,11 +603,7 @@ export class Filesystem {
   async write(
     pathOrFiles: string | WriteEntry[],
     dataOrOpts?:
-      | string
-      | ArrayBuffer
-      | Blob
-      | ReadableStream
-      | FilesystemWriteOpts,
+      string | ArrayBuffer | Blob | ReadableStream | FilesystemWriteOpts,
     opts?: FilesystemWriteOpts
   ): Promise<WriteInfo | WriteInfo[]> {
     if (typeof pathOrFiles !== 'string' && !Array.isArray(pathOrFiles)) {
@@ -621,10 +624,7 @@ export class Filesystem {
             writeFiles: [
               {
                 data: dataOrOpts as
-                  | string
-                  | ArrayBuffer
-                  | Blob
-                  | ReadableStream,
+                  string | ArrayBuffer | Blob | ReadableStream,
               },
             ],
           }
@@ -656,7 +656,7 @@ export class Filesystem {
     // applies to the whole request body). An explicit `useOctetStream` wins.
     const hasStreamableData =
       runtime !== 'browser' &&
-      writeFiles.some((file) => file.data instanceof ReadableStream)
+      writeFiles.some((file) => isReadableStreamLike(file.data))
     const useOctetStream =
       ((writeOpts?.useOctetStream ?? hasStreamableData) || useGzip) &&
       supportsOctetStream
@@ -688,14 +688,13 @@ export class Filesystem {
       const uploadResults = await Promise.all(
         writeFiles.map(async (file) => {
           const filePath = path ?? (file as WriteEntry).path
-          const body = await toUploadBody(file.data, useGzip)
-          const isStream = body instanceof ReadableStream
+          const { body, streamed } = await toUploadBody(file.data, useGzip)
           // A streamed upload carries no client-side timeout: the socket-write
           // "wire" isn't observable through fetch, and a stalled producer is
           // the caller's own code, so a stuck streamed upload is bounded
           // server-side (or via `writeOpts.signal`). Buffered uploads keep the
           // normal request timeout.
-          const signal = isStream
+          const signal = streamed
             ? writeOpts?.signal
             : this.connectionConfig.getSignal(
                 writeOpts?.requestTimeoutMs,
@@ -715,7 +714,7 @@ export class Filesystem {
               signal,
               body: {},
               // Streaming request bodies require half-duplex mode.
-              ...(isStream && {
+              ...(streamed && {
                 duplex: 'half' as const,
               }),
             })

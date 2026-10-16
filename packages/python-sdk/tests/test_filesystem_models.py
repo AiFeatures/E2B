@@ -1,9 +1,11 @@
 import datetime
+import io
 
 from protobuf.wkt import Timestamp
 
 from e2b.envd.filesystem import filesystem_pb
 from e2b.sandbox.filesystem.filesystem import (
+    multipart_body_is_streamed,
     FileType,
     WriteInfo,
     map_entry_info,
@@ -128,3 +130,52 @@ def test_convert_volume_entry_stat_normalizes_naive_times_to_utc():
     assert stat.atime.tzinfo == datetime.timezone.utc
     assert stat.mtime.tzinfo == datetime.timezone.utc
     assert stat.ctime.tzinfo == datetime.timezone.utc
+
+
+def test_multipart_body_is_streamed_only_for_binary_file_like_entries():
+    # The multipart upload drops its request deadline only when httpx really
+    # streams the body; `_to_httpx_file` reads text file-like data into memory,
+    # so those uploads must stay bounded like str/bytes ones.
+    assert not multipart_body_is_streamed([{"path": "a.txt", "data": "text"}])
+    assert not multipart_body_is_streamed([{"path": "a.bin", "data": b"bytes"}])
+    assert not multipart_body_is_streamed(
+        [{"path": "a.txt", "data": io.StringIO("text")}]
+    )
+    assert multipart_body_is_streamed([{"path": "a.bin", "data": io.BytesIO(b"bytes")}])
+    # Any streamed entry makes the whole body streamed.
+    assert multipart_body_is_streamed(
+        [
+            {"path": "a.txt", "data": "text"},
+            {"path": "b.bin", "data": io.BytesIO(b"bytes")},
+        ]
+    )
+
+
+def test_map_entry_info_reports_symlink_when_envd_marks_the_entry():
+    # Newer envd puts the target's type in `type` and marks the link with `is_symlink`.
+    def entry(file_type, is_symlink: bool):
+        return filesystem_pb.EntryInfo(
+            name="link",
+            type=file_type,
+            path="/home/user/link",
+            size=0,
+            mode=0o777,
+            permissions="lrwxrwxrwx",
+            owner="user",
+            group="user",
+            symlink_target="/home/user/releases/v1",
+            is_symlink=is_symlink,
+        )
+
+    to_dir = map_entry_info(entry(filesystem_pb.FileType.DIRECTORY, True))
+    assert to_dir.type is FileType.SYMLINK
+    assert to_dir.symlink_target == "/home/user/releases/v1"
+    assert (
+        map_entry_info(entry(filesystem_pb.FileType.FILE, True)).type
+        is FileType.SYMLINK
+    )
+    # Without the flag the target type stands, as for a plain directory.
+    assert (
+        map_entry_info(entry(filesystem_pb.FileType.DIRECTORY, False)).type
+        is FileType.DIR
+    )

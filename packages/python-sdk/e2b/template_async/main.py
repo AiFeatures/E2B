@@ -4,6 +4,7 @@ from typing import Callable, List, Optional, Union
 from typing_extensions import Unpack
 
 from e2b.api.client.client import AuthenticatedClient
+from e2b.api.client.types import Unset
 from e2b.connection_config import ApiParams, ConnectionConfig
 from e2b.template.consts import GZIP, RESOLVE_SYMLINKS
 from e2b.template.logger import LogEntry, LogEntryEnd, LogEntryStart
@@ -37,8 +38,9 @@ class AsyncTemplate(TemplateBase):
         template: TemplateClass,
         name: str,
         tags: Optional[List[str]] = None,
-        cpu_count: int = 2,
-        memory_mb: int = 1024,
+        cpu_count: Optional[int] = None,
+        memory_mb: Optional[int] = None,
+        min_free_disk_mb: Optional[int] = None,
         skip_cache: bool = False,
         on_build_logs: Optional[Callable[[LogEntry], None]] = None,
         request_timeout: Optional[float] = None,
@@ -50,8 +52,9 @@ class AsyncTemplate(TemplateBase):
         :param template: The template to build
         :param name: Name for the template
         :param tags: Optional tags for the template
-        :param cpu_count: Number of CPUs allocated to the sandbox
-        :param memory_mb: Amount of memory in MB allocated to the sandbox
+        :param cpu_count: Number of CPUs allocated to the sandbox.
+        :param memory_mb: Amount of memory in MB allocated to the sandbox.
+        :param min_free_disk_mb: Requested minimum free space after the build steps, in MiB. Growth is best effort and the filesystem is never shrunk. Omit to use the team default or set to 0 to request no growth.
         :param skip_cache: If True, forces a complete rebuild ignoring cache
         :param on_build_logs: Callback function to receive build logs during the build process
         """
@@ -74,6 +77,7 @@ class AsyncTemplate(TemplateBase):
             name=name,
             cpu_count=cpu_count,
             memory_mb=memory_mb,
+            min_free_disk_mb=min_free_disk_mb,
             tags=tags,
         )
 
@@ -128,12 +132,17 @@ class AsyncTemplate(TemplateBase):
                     template._template._file_context_path,
                     file_info.url,
                     [
-                        *template._template._file_ignore_patterns,
                         *read_dockerignore(template._template._file_context_path),
+                        *template._template._file_ignore_patterns,
                     ],
                     resolve_symlinks,
                     gzip,
                     stack_trace,
+                    headers=(
+                        file_info.headers.to_dict()
+                        if not isinstance(file_info.headers, Unset)
+                        else None
+                    ),
                     request_timeout=request_timeout,
                 )
                 if on_build_logs:
@@ -188,15 +197,17 @@ class AsyncTemplate(TemplateBase):
             tags=response_tags,
         )
 
-    @staticmethod
+    @classmethod
     async def build(
+        cls,
         template: TemplateClass,
         name: Optional[str] = None,
         *,
         alias: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        cpu_count: int = 2,
-        memory_mb: int = 1024,
+        cpu_count: Optional[int] = None,
+        memory_mb: Optional[int] = None,
+        min_free_disk_mb: Optional[int] = None,
         skip_cache: bool = False,
         on_build_logs: Optional[Callable[[LogEntry], None]] = None,
         **opts: Unpack[ApiParams],
@@ -208,8 +219,9 @@ class AsyncTemplate(TemplateBase):
         :param name: Template name in 'name' or 'name:tag' format
         :param alias: (Deprecated) Alias name for the template. Use name instead.
         :param tags: Optional additional tags to assign to the template
-        :param cpu_count: Number of CPUs allocated to the sandbox
-        :param memory_mb: Amount of memory in MB allocated to the sandbox
+        :param cpu_count: Number of CPUs allocated to the sandbox.
+        :param memory_mb: Amount of memory in MB allocated to the sandbox.
+        :param min_free_disk_mb: Requested minimum free space after the build steps, in MiB. Growth is best effort and the filesystem is never shrunk. Omit to use the team default or set to 0 to request no growth.
         :param skip_cache: If True, forces a complete rebuild ignoring cache
         :param on_build_logs: Callback function to receive build logs during the build process
 
@@ -242,23 +254,25 @@ class AsyncTemplate(TemplateBase):
                     )
                 )
 
-            config = ConnectionConfig(**opts)
+            api_params = cls._resolve_api_params(**opts)
+            config = ConnectionConfig(**api_params)
             api_client = get_api_client(
                 config,
             )
 
-            data = await AsyncTemplate._build(
+            data = await cls._build(
                 api_client,
                 template,
                 name,
                 tags=tags,
                 cpu_count=cpu_count,
                 memory_mb=memory_mb,
+                min_free_disk_mb=min_free_disk_mb,
                 skip_cache=skip_cache,
                 on_build_logs=on_build_logs,
                 # Only honor an explicitly set request_timeout for uploads;
                 # otherwise upload_file applies its 1-hour default.
-                request_timeout=opts.get("request_timeout"),
+                request_timeout=api_params.get("request_timeout"),
             )
 
             if on_build_logs:
@@ -275,7 +289,7 @@ class AsyncTemplate(TemplateBase):
                 data.template_id,
                 data.build_id,
                 on_build_logs,
-                logs_refresh_frequency=TemplateBase._logs_refresh_frequency,
+                logs_refresh_frequency=cls._logs_refresh_frequency,
                 stack_traces=template._template._stack_traces,
             )
 
@@ -289,15 +303,17 @@ class AsyncTemplate(TemplateBase):
                     )
                 )
 
-    @staticmethod
+    @classmethod
     async def build_in_background(
+        cls,
         template: TemplateClass,
         name: Optional[str] = None,
         *,
         alias: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        cpu_count: int = 2,
-        memory_mb: int = 1024,
+        cpu_count: Optional[int] = None,
+        memory_mb: Optional[int] = None,
+        min_free_disk_mb: Optional[int] = None,
         skip_cache: bool = False,
         on_build_logs: Optional[Callable[[LogEntry], None]] = None,
         **opts: Unpack[ApiParams],
@@ -309,8 +325,9 @@ class AsyncTemplate(TemplateBase):
         :param name: Template name in 'name' or 'name:tag' format
         :param alias: (Deprecated) Alias name for the template. Use name instead.
         :param tags: Optional additional tags to assign to the template
-        :param cpu_count: Number of CPUs allocated to the sandbox
-        :param memory_mb: Amount of memory in MB allocated to the sandbox
+        :param cpu_count: Number of CPUs allocated to the sandbox.
+        :param memory_mb: Amount of memory in MB allocated to the sandbox.
+        :param min_free_disk_mb: Requested minimum free space after the build steps, in MiB. Growth is best effort and the filesystem is never shrunk. Omit to use the team default or set to 0 to request no growth.
         :param skip_cache: If True, forces a complete rebuild ignoring cache
         :return: BuildInfo containing the template ID and build ID
 
@@ -334,36 +351,39 @@ class AsyncTemplate(TemplateBase):
         """
         name = normalize_build_arguments(name, alias)
 
-        config = ConnectionConfig(**opts)
+        api_params = cls._resolve_api_params(**opts)
+        config = ConnectionConfig(**api_params)
         api_client = get_api_client(
             config,
         )
 
-        return await AsyncTemplate._build(
+        return await cls._build(
             api_client,
             template,
             name,
             tags=tags,
             cpu_count=cpu_count,
             memory_mb=memory_mb,
+            min_free_disk_mb=min_free_disk_mb,
             skip_cache=skip_cache,
             on_build_logs=on_build_logs,
             # Only honor an explicitly set request_timeout for uploads;
             # otherwise upload_file applies its 1-hour default.
-            request_timeout=opts.get("request_timeout"),
+            request_timeout=api_params.get("request_timeout"),
         )
 
-    @staticmethod
+    @classmethod
     async def get_build_status(
+        cls,
         build_info: BuildInfo,
-        logs_offset: int = 0,
+        logs_offset: Optional[int] = None,
         **opts: Unpack[ApiParams],
     ):
         """
         Get the status of a build.
 
         :param build_info: Build identifiers returned from build_in_background
-        :param logs_offset: Offset for fetching logs
+        :param logs_offset: Offset for fetching logs; when omitted, the API default applies
         :return: TemplateBuild containing the build status and logs
 
         Example
@@ -371,10 +391,10 @@ class AsyncTemplate(TemplateBase):
         from e2b import AsyncTemplate
 
         build_info = await AsyncTemplate.build_in_background(template, alias='my-template')
-        status = await AsyncTemplate.get_build_status(build_info, logs_offset=0)
+        status = await AsyncTemplate.get_build_status(build_info)
         ```
         """
-        config = ConnectionConfig(**opts)
+        config = ConnectionConfig(**cls._resolve_api_params(**opts))
         api_client = get_api_client(
             config,
         )
@@ -385,8 +405,9 @@ class AsyncTemplate(TemplateBase):
             logs_offset,
         )
 
-    @staticmethod
+    @classmethod
     async def exists(
+        cls,
         name: str,
         **opts: Unpack[ApiParams],
     ) -> bool:
@@ -406,10 +427,11 @@ class AsyncTemplate(TemplateBase):
         ```
         """
 
-        return await AsyncTemplate.alias_exists(name, **opts)
+        return await cls.alias_exists(name, **opts)
 
-    @staticmethod
+    @classmethod
     async def alias_exists(
+        cls,
         alias: str,
         **opts: Unpack[ApiParams],
     ) -> bool:
@@ -430,15 +452,16 @@ class AsyncTemplate(TemplateBase):
             print('Template exists!')
         ```
         """
-        config = ConnectionConfig(**opts)
+        config = ConnectionConfig(**cls._resolve_api_params(**opts))
         api_client = get_api_client(
             config,
         )
 
         return await check_alias_exists(api_client, alias)
 
-    @staticmethod
+    @classmethod
     async def assign_tags(
+        cls,
         target_name: str,
         tags: Union[str, List[str]],
         **opts: Unpack[ApiParams],
@@ -461,7 +484,7 @@ class AsyncTemplate(TemplateBase):
         result = await AsyncTemplate.assign_tags('my-template:v1.0', ['production', 'stable'])
         ```
         """
-        config = ConnectionConfig(**opts)
+        config = ConnectionConfig(**cls._resolve_api_params(**opts))
         api_client = get_api_client(
             config,
         )
@@ -469,8 +492,9 @@ class AsyncTemplate(TemplateBase):
         normalized_tags = [tags] if isinstance(tags, str) else tags
         return await assign_tags(api_client, target_name, normalized_tags)
 
-    @staticmethod
+    @classmethod
     async def remove_tags(
+        cls,
         name: str,
         tags: Union[str, List[str]],
         **opts: Unpack[ApiParams],
@@ -492,7 +516,7 @@ class AsyncTemplate(TemplateBase):
         await AsyncTemplate.remove_tags('my-template', ['production', 'stable'])
         ```
         """
-        config = ConnectionConfig(**opts)
+        config = ConnectionConfig(**cls._resolve_api_params(**opts))
         api_client = get_api_client(
             config,
         )
@@ -500,8 +524,9 @@ class AsyncTemplate(TemplateBase):
         normalized_tags = [tags] if isinstance(tags, str) else tags
         await remove_tags(api_client, name, normalized_tags)
 
-    @staticmethod
+    @classmethod
     async def get_tags(
+        cls,
         template_id: str,
         **opts: Unpack[ApiParams],
     ) -> List[TemplateTag]:
@@ -520,7 +545,7 @@ class AsyncTemplate(TemplateBase):
             print(f"Tag: {tag.tag}, Build: {tag.build_id}, Created: {tag.created_at}")
         ```
         """
-        config = ConnectionConfig(**opts)
+        config = ConnectionConfig(**cls._resolve_api_params(**opts))
         api_client = get_api_client(
             config,
         )
