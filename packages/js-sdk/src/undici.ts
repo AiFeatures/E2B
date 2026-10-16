@@ -1,7 +1,8 @@
 import { compareVersions } from 'compare-versions'
 
-import { limitConcurrency } from './api/inflight'
-import { dynamicImport } from './utils'
+import { isReadableStreamLike, isRequestLike } from './is'
+import { dynamicImport, toDispatchableStream } from './utils'
+import { DEFAULT_HTTP_VERSION, type HttpVersion } from './connectionConfig'
 
 type UndiciRequestInit = RequestInit & {
   dispatcher?: unknown
@@ -9,36 +10,31 @@ type UndiciRequestInit = RequestInit & {
 }
 
 export type UndiciModule = {
-  Agent: new (options: { allowH2: true; connections?: number }) => unknown
+  Agent: new (options: { allowH2: boolean; connections?: number }) => unknown
   ProxyAgent: new (options: {
     uri: string
-    allowH2: true
+    allowH2: boolean
     connections?: number
     proxyTunnel: true
   }) => unknown
   fetch: unknown
 }
 
-const UNDICI_8_MIN_NODE = '22.19.0'
+const UNDICI_MIN_NODE = '22.19.0'
 
-export function getUndiciPackageCandidates(nodeVersion: string): string[] {
-  if (compareVersions(nodeVersion, UNDICI_8_MIN_NODE) >= 0) {
-    return ['undici8', 'undici']
+export async function loadUndici(
+  nodeVersion = globalThis.process?.versions?.node
+): Promise<UndiciModule | undefined> {
+  if (!nodeVersion || compareVersions(nodeVersion, UNDICI_MIN_NODE) < 0) {
+    return undefined
   }
 
-  return ['undici']
-}
-
-export async function loadUndici(): Promise<UndiciModule | undefined> {
-  for (const packageName of getUndiciPackageCandidates(process.versions.node)) {
-    try {
-      return await dynamicImport<UndiciModule>(packageName)
-    } catch {
-      // Try the next package supported by this Node version.
-    }
+  try {
+    return await dynamicImport<UndiciModule>('undici')
+  } catch {
+    // Fall back to the global fetch when undici cannot load (e.g. bundled apps).
+    return undefined
   }
-
-  return undefined
 }
 
 /**
@@ -86,33 +82,33 @@ export function createRuntimeFetch(
 }
 
 /**
- * Build a fetch bound to a bounded undici dispatcher (HTTP/2 enabled,
- * `connections` origin connections, optional proxy tunnel), capped at
- * `inflightLimit` in-flight requests (`0` disables the cap). Falls back to
- * the global fetch — still capped — when undici cannot be loaded.
+ * Build a fetch bound to a bounded undici dispatcher (HTTP/2 enabled unless
+ * `httpVersion` is `'1.1'`, `connections` origin connections, optional proxy
+ * tunnel). Falls back to the global fetch when undici cannot be loaded.
  */
 export async function buildDispatchedFetch(options: {
   connections: number
-  inflightLimit: number
   proxy?: string
+  httpVersion?: HttpVersion
   loadUndici?: () => Promise<UndiciModule | undefined>
 }): Promise<typeof fetch> {
   const undici = await (options.loadUndici ?? loadUndici)()
 
   if (!undici) {
-    return limitConcurrency(lateBoundGlobalFetch(), options.inflightLimit)
+    return lateBoundGlobalFetch()
   }
 
   const { Agent, ProxyAgent, fetch: undiciFetch } = undici
+  const allowH2 = (options.httpVersion ?? DEFAULT_HTTP_VERSION) === '2'
   const dispatcher = options.proxy
     ? new ProxyAgent({
         uri: options.proxy,
-        allowH2: true,
+        allowH2,
         connections: options.connections,
         proxyTunnel: true,
       })
     : new Agent({
-        allowH2: true,
+        allowH2,
         connections: options.connections,
       })
   const fetchWithDispatcher = undiciFetch as unknown as (
@@ -120,7 +116,7 @@ export async function buildDispatchedFetch(options: {
     init?: UndiciRequestInit
   ) => Promise<Response>
 
-  const wrapped: typeof fetch = ((input, init) => {
+  return ((input, init) => {
     const request = toUndiciRequestInput(input, init)
 
     return fetchWithDispatcher(request.input, {
@@ -128,20 +124,27 @@ export async function buildDispatchedFetch(options: {
       dispatcher,
     })
   }) as typeof fetch
-
-  return limitConcurrency(wrapped, options.inflightLimit)
 }
 
 function toUndiciRequestInput(
   input: RequestInfo | URL,
   init?: RequestInit
 ): { input: RequestInfo | URL; init?: RequestInit & { duplex?: 'half' } } {
-  if (!(input instanceof Request)) {
+  // Every Request has to be taken apart here, including one the current global
+  // class disowns: undici brand-checks against its own `Request`, so anything
+  // it didn't mint itself — even a native one — is coerced to a URL string and
+  // fails with `Failed to parse URL from [object Request]`.
+  if (!isRequestLike(input)) {
     return { input, init }
   }
 
   const requestInit: RequestInit & { duplex?: 'half' } = {
-    body: input.body,
+    // A Request from another implementation exposes that implementation's
+    // stream as its body, which undici would stringify just like the Request
+    // itself. Native bodies pass through untouched.
+    body: isReadableStreamLike(input.body)
+      ? toDispatchableStream(input.body)
+      : input.body,
     cache: input.cache,
     credentials: input.credentials,
     headers: input.headers,

@@ -10,10 +10,13 @@ import { createCommand } from './create'
 import { logsCommand } from './logs'
 import { metricsCommand } from './metrics'
 import { execCommand } from './exec'
+import { snapshotCommand } from './snapshot'
+import { forkCommand } from './fork'
 
 export const sandboxCommand = new commander.Command('sandbox')
   .description('work with sandboxes')
   .alias('sbx')
+  .enablePositionalOptions()
   .addCommand(connectCommand)
   .addCommand(infoCommand)
   .addCommand(listCommand)
@@ -25,3 +28,5 @@ export const sandboxCommand = new commander.Command('sandbox')
   .addCommand(logsCommand)
   .addCommand(metricsCommand)
   .addCommand(execCommand)
+  .addCommand(snapshotCommand)
+  .addCommand(forkCommand)
